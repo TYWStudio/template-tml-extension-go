@@ -1,241 +1,71 @@
-// TML Extension API v1 —— Go 语言宿主 SDK（运行时：native / go）
+// TML 扩展模板 · Go
 //
-// TYW Launcher 的扩展永远运行在启动器进程之外，仅通过 stdin/stdout 的
-// NDJSON（每行一个 JSON）交换白名单方法。本文件是最小实现，只依赖 Go
-// 标准库：
+// 业务代码只写在这个文件里。NDJSON 会话、initialize 握手、按 id 分发请求、
+// 白名单能力（log / toast / host.info / instances.list / storage / settings）
+// 全部来自 TML 仓库的 extensions/sdk/go —— 通过 go.mod 引用，不要复制一份进来。
 //
-//   - 自动完成 initialize 握手；
-//   - 封装 log / toast / host.info / instances.list / event.subscribe /
-//     storage.get / storage.set / settings.get / settings.set；
-//   - 接收宿主广播的事件，收到 shutdown 优雅退出。
-//
-// 可调用的能力由 manifest.json 的 permissions 决定，未申请的永远不会返回数据。
-// 详见启动器「设置 → 其他 → 拓展」或拓展协议文档 extensions/README.md。
+// 宿主（TYW Launcher）把 .tmlext 解开后，直接把包里 bin/tml_ext 当独立进程拉起，
+// 双方只用 stdin/stdout 通信；能调用什么由 manifest.json 的 permissions 决定。
 package main
 
 import (
-	"bufio"
 	"encoding/json"
-	"fmt"
-	"io"
-	"os"
-	"strings"
+
+	tmlext "github.com/TYWStudio/TML/extensions/sdk/go"
 )
 
-// host 维护与启动器的 NDJSON 会话。
-type host struct {
-	in     *bufio.Scanner
-	nextID int64
-	stop   bool
-}
+// extension 是业务入口，两个方法都可以留空。
+type extension struct{}
 
-func newHost() *host {
-	sc := bufio.NewScanner(os.Stdin)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	return &host{in: sc, nextID: 2}
-}
+// Ready 在握手成功后调用一次，适合做初始化。
+func (extension) Ready() {
+	tmlext.Log("info", "扩展已启动（TML Extension API v1）")
 
-// send 向宿主写一行 JSON。
-func (h *host) send(v any) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(os.Stdout, "%s\n", b)
-	return err
-}
-
-func toInt(v any) int64 {
-	switch n := v.(type) {
-	case float64:
-		return int64(n)
-	case int64:
-		return n
-	case json.Number:
-		i, _ := n.Int64()
-		return i
-	}
-	return -1
-}
-
-// call 同步调用宿主能力，阻塞到拿到同 id 的响应。
-func (h *host) call(method string, params map[string]any) (map[string]any, error) {
-	id := h.nextID
-	h.nextID++
-	msg := map[string]any{"id": id, "method": method}
-	if params != nil {
-		msg["params"] = params
-	}
-	if err := h.send(msg); err != nil {
-		return nil, err
-	}
-	for h.in.Scan() {
-		line := strings.TrimSpace(h.in.Text())
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			continue
-		}
-		if rid, ok := m["id"]; ok && toInt(rid) == id {
-			if e, isErr := m["error"]; isErr {
-				return nil, fmt.Errorf("宿主返回错误：%v", e)
-			}
-			if r, ok := m["result"].(map[string]any); ok {
-				return r, nil
-			}
-			return map[string]any{}, nil
-		}
-		h.handle(m)
-		if h.stop {
-			break
+	// 宿主信息：平台、架构、启动器版本、通道、语言
+	if info := tmlext.HostInfo(); info != nil {
+		if b, err := json.Marshal(info); err == nil {
+			tmlext.Log("info", "host.info = "+string(b))
 		}
 	}
-	return nil, io.EOF
+
+	// 只读实例列表（需要 manifest 里申请 instances.list）
+	for _, inst := range tmlext.Instances() {
+		if b, err := json.Marshal(inst); err == nil {
+			tmlext.Log("info", "instance = "+string(b))
+		}
+	}
+
+	// 订阅事件（manifest 的 subscribe 里也要写）
+	_ = tmlext.Subscribe("launcher.started", "game.launched", "settings.changed")
+
+	// 私有存储：跟着扩展自己的目录走，卸载就没了
+	_ = tmlext.StorageSet("lastRun", tmlext.Env("launcher_version"))
+	if v, ok := tmlext.StorageGet("lastRun"); ok {
+		tmlext.Log("info", "上次运行版本："+v)
+	}
+
+	// 扩展设置：显示在启动器的扩展详情里
+	_ = tmlext.SettingsSet("greeted", "1")
+	if v, ok := tmlext.SettingsGet("greeted"); ok {
+		tmlext.Log("info", "greeted = "+v)
+	}
+
+	tmlext.Toast("扩展已就绪")
 }
 
-// handle 处理一条来自宿主的消息；返回 false 表示应当退出。
-func (h *host) handle(m map[string]any) bool {
-	if _, isResp := m["result"]; isResp {
-		return !h.stop
-	}
-	if _, isErr := m["error"]; isErr {
-		return !h.stop
-	}
-	method, _ := m["method"].(string)
-	id := toInt(m["id"])
-	switch method {
-	case "initialize":
-		_ = h.send(map[string]any{"id": id, "result": map[string]any{"ready": true}})
-	case "shutdown":
-		h.stop = true
-	case "event":
-		if p, ok := m["params"].(map[string]any); ok {
-			if t, ok := p["type"].(string); ok {
-				fmt.Fprintf(os.Stderr, "[event] %s\n", t)
-			}
-		}
+// OnEvent 接收订阅到的事件（数据已由宿主脱敏）。
+func (extension) OnEvent(e tmlext.Event) {
+	switch e.Type {
+	case "launcher.started":
+		tmlext.Log("info", "启动器已就绪")
+	case "game.launched":
+		name, _ := e.Data["name"].(string)
+		tmlext.Log("info", "开始游戏："+name)
 	default:
-		// 宿主下发的自定义命令：模板一律确认
-		_ = h.send(map[string]any{"id": id, "result": map[string]any{}})
+		tmlext.Log("info", "事件 "+e.Type)
 	}
-	return !h.stop
-}
-
-// ------------------------- 白名单能力封装 -------------------------
-
-func (h *host) log(level, message string) {
-	_, _ = h.call("log", map[string]any{"level": level, "message": message})
-}
-
-func (h *host) toast(message string) {
-	_, _ = h.call("toast", map[string]any{"message": message})
-}
-
-func (h *host) hostInfo() map[string]any {
-	r, _ := h.call("host.info", nil)
-	return r
-}
-
-func (h *host) listInstances() map[string]any {
-	r, _ := h.call("instances.list", nil)
-	return r
-}
-
-func (h *host) subscribe(types []string) map[string]any {
-	r, _ := h.call("event.subscribe", map[string]any{"types": types})
-	return r
-}
-
-func (h *host) storageSet(key, value string) {
-	_, _ = h.call("storage.set", map[string]any{"key": key, "value": value})
-}
-
-func (h *host) storageGet(key string) map[string]any {
-	r, _ := h.call("storage.get", map[string]any{"key": key})
-	return r
-}
-
-func (h *host) settingsSet(key, value string) {
-	_, _ = h.call("settings.set", map[string]any{"key": key, "value": value})
-}
-
-func (h *host) settingsGet(key string) map[string]any {
-	r, _ := h.call("settings.get", map[string]any{"key": key})
-	return r
 }
 
 func main() {
-	// 宿主下发的协议配置（环境变量）
-	extID := os.Getenv("TML_EXT_ID")
-	api := os.Getenv("TML_EXT_API")
-	fmt.Fprintf(os.Stderr, "[Go 扩展] id=%s api=%s\n", extID, api)
-
-	h := newHost()
-
-	// 等待 initialize 握手
-	ready := false
-	for h.in.Scan() {
-		line := strings.TrimSpace(h.in.Text())
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			continue
-		}
-		method, _ := m["method"].(string)
-		h.handle(m)
-		if method == "initialize" {
-			ready = true
-			break
-		}
-		if h.stop {
-			break
-		}
-	}
-	if !ready {
-		// 没握手就断开（宿主没启动我们，或 stdin 被关掉）：直接退出，不执行业务逻辑
-		fmt.Fprintln(os.Stderr, "[Go 扩展] 未收到 initialize 握手，退出")
-		return
-	}
-
-	// ===================== 下面是扩展的业务逻辑示例 =====================
-	h.log("info", "Go 扩展已启动（TML Extension API v1）")
-
-	if info := h.hostInfo(); info != nil {
-		if b, err := json.Marshal(info); err == nil {
-			fmt.Fprintf(os.Stderr, "[host.info] %s\n", b)
-		}
-	}
-	if list := h.listInstances(); list != nil {
-		if b, err := json.Marshal(list); err == nil {
-			fmt.Fprintf(os.Stderr, "[instances] %s\n", b)
-		}
-	}
-	h.subscribe([]string{"launcher.started", "game.launched", "settings.changed"})
-
-	h.storageSet("demo", "hello")
-	fmt.Fprintf(os.Stderr, "[storage.get demo] %v\n", h.storageGet("demo"))
-	h.settingsSet("foo", "bar")
-	fmt.Fprintf(os.Stderr, "[settings.get foo] %v\n", h.settingsGet("foo"))
-
-	h.toast("Go 扩展已就绪")
-
-	// 保持运行，处理事件与命令直到 shutdown
-	for h.in.Scan() {
-		line := strings.TrimSpace(h.in.Text())
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			continue
-		}
-		if !h.handle(m) {
-			break
-		}
-	}
-	fmt.Fprintln(os.Stderr, "[Go 扩展] 已退出")
+	tmlext.Run(extension{})
 }

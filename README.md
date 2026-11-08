@@ -4,10 +4,14 @@
 
 # TML Extension Template · Go
 
-A **Go** extension template for the **TYW Launcher (TML)** extension API v1. It shows how to write a
-launcher extension in Go — **standard library only, no third-party modules** — where the host
-(launcher) spawns your compiled static binary in a separate process and the two sides exchange
-allow-listed methods over **NDJSON on stdin/stdout** (one JSON object per line).
+A **Go** extension template for the **TYW Launcher (TML)** extension API v1. The host (launcher)
+spawns your compiled static binary in a separate process and the two sides exchange allow-listed
+methods over **NDJSON on stdin/stdout** (one JSON object per line).
+
+The SDK (session, handshake, request dispatch, allow-listed capabilities) lives in the **TML
+repository** at [`extensions/sdk/go`](https://github.com/TYWStudio/TML/tree/main/extensions/sdk/go).
+This template references it from `go.mod` (`require .../extensions/sdk/go v1.0.0`) and keeps
+`src/main.go` for your own logic — **never copy the SDK in here**.
 
 > License: **CC BY-NC 4.0** (non-commercial, attribution). See `LICENSE`.
 >
@@ -36,7 +40,8 @@ Host → Ext: {"method":"event","params":{"type":"game.launched","data":{...}}}
 Host → Ext: {"method":"shutdown"}                                (the extension just exits)
 ```
 
-`src/main.go` implements the session with `encoding/json` only. The host also passes configuration
+The session is implemented by the SDK, not by this repository; `src/main.go` only handles `Ready` /
+`OnEvent`. The host also passes configuration
 through environment variables:
 
 | Variable | Meaning |
@@ -55,8 +60,9 @@ through environment variables:
 
 ## Build
 
-Requires **Go 1.21+**. Nothing is downloaded from the module proxy (no dependencies), so the build
-works offline. Python 3 is used for packaging.
+Requires **Go 1.21+** and Python 3 (for packaging). The SDK is a normal module dependency:
+`build.sh` / `build.bat` run `go mod tidy` first, which downloads it once (behind the Great Firewall
+set `GOPROXY=https://goproxy.cn,direct`), then it comes from the local cache.
 
 ### Linux / macOS
 
@@ -119,7 +125,7 @@ launcher console.
 template-tml-extension-go/
 ├── manifest.json         # Extension manifest
 ├── go.mod                # std-only module
-├── src/main.go           # NDJSON SDK (encoding/json) + example logic
+├── src/main.go           # your logic (Ready / OnEvent); the SDK lives in TML
 ├── build.py              # Cross-platform packaging into .tmlext
 ├── build.sh / build.bat  # Compile + package
 ├── tests/                # Manifest check + host-side protocol smoke test

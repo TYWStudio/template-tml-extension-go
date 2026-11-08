@@ -27,6 +27,9 @@ jobs:
       - name: Validate manifest
         run: python3 tests/check_manifest.py go
 
+      - name: Resolve SDK
+        run: go mod tidy
+
       - name: Build (go)
         run: |
           go vet ./...

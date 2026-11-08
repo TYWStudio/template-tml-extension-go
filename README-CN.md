@@ -6,9 +6,13 @@
 
 # TML 扩展模板 · Go（template-tml-extension-go）
 
-适用于 **TYW Launcher（TML）扩展 API v1** 的 **Go 语言**扩展模板。本模板演示如何用纯 Go
-（**只用标准库，不引入任何第三方模块**）编写启动器扩展：宿主（启动器）在独立进程里拉起你编译好的
-静态可执行文件，双方仅通过 **stdin / stdout 的 NDJSON（每行一个 JSON）** 交换白名单方法。
+适用于 **TYW Launcher（TML）扩展 API v1** 的 **Go 语言**扩展模板。宿主（启动器）在独立进程里
+拉起你编译好的静态可执行文件，双方仅通过 **stdin / stdout 的 NDJSON（每行一个 JSON）** 交换白名单方法。
+
+SDK（会话、握手、按 id 分发、白名单能力）只在 **TML 仓库** 的
+[`extensions/sdk/go`](https://github.com/TYWStudio/TML/tree/main/extensions/sdk/go) 维护，
+本仓库通过 `go.mod` 引用它（`require .../extensions/sdk/go v1.0.0`），`src/main.go` 里只写业务逻辑。
+**不要在模板里复制一份 SDK**：协议改动只会发生在 TML 仓库，模板升级依赖版本即可。
 
 > 许可：**CC BY-NC 4.0**（禁止商业使用，署名）。见 `LICENSE`。
 
@@ -34,7 +38,7 @@
 宿主 → 扩展: {"method":"shutdown"}                                （扩展直接退出）
 ```
 
-`src/main.go` 只用了 `encoding/json` 实现整套会话；宿主还会通过环境变量下发配置：
+会话实现不在本仓库（见上面的 SDK），`src/main.go` 只处理 `Ready` / `OnEvent`。宿主还会通过环境变量下发配置：
 
 | 变量 | 含义 |
 | --- | --- |
@@ -52,7 +56,8 @@
 
 ## 构建
 
-需要 **Go 1.21+**。模板没有任何依赖，不会从模块代理下载东西，离线也能构建；打包用 Python 3。
+需要 **Go 1.21+** 与 Python 3（打包用）。SDK 是普通 Go 模块依赖，`build.sh` / `build.bat` 里会先跑
+`go mod tidy`：首次构建从模块代理拉一次（国内可设 `GOPROXY=https://goproxy.cn,direct`），之后走本地缓存。
 
 ### Linux / macOS
 
@@ -113,8 +118,8 @@ python3 tests/smoke.py ./bin/tml_ext   # 协议冒烟测试
 ```
 template-tml-extension-go/
 ├── manifest.json         # 扩展清单
-├── go.mod                # 仅标准库的模块
-├── src/main.go           # NDJSON SDK（encoding/json）+ 示例逻辑
+├── go.mod                # 引用 TML 仓库的 SDK（go.sum 已锁定版本）
+├── src/main.go           # 业务逻辑（Ready / OnEvent），SDK 不在本仓库
 ├── build.py              # 跨平台打包为 .tmlext
 ├── build.sh / build.bat  # 编译 + 打包
 ├── tests/                # 清单校验 + 宿主侧协议冒烟测试
